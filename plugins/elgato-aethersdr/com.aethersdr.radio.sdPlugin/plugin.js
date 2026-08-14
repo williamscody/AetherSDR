@@ -33,6 +33,7 @@ function newSliceState() {
         nbOn: false, nrOn: false, anfOn: false, apfOn: false,
         sqlOn: false, split: false, locked: false,
         ritOn: false, xitOn: false,
+        band: null,  // server-authoritative, from band_select: broadcasts
     };
 }
 
@@ -287,28 +288,26 @@ function parseTci(msg) {
                     // echo has to go through its guard or the write below
                     // would clobber a spin in progress anyway.
                     known.add("vfo:" + trx);
-                    // Inside the band-change window the FREQUENCY is guarded
-                    // too, not just the cursor. Per the note above BANDS, the
-                    // server keeps reporting the pre-change frequency for a
-                    // moment after a band change — the guard stopped that from
-                    // dragging bandCursor back, but nothing stopped it landing
-                    // on slice.frequency, so a Tune Up pressed right after a
-                    // Band Up stepped from the OLD band and pulled the radio
-                    // back to it.
-                    //
-                    // Rather than ignore the whole window, take the echo that
-                    // actually CONFIRMS the band we commanded, and let it end
-                    // the window early. A stale echo names the old band and is
-                    // dropped; the real one arrives and is applied at once, so
-                    // this costs no responsiveness in the normal case.
-                    let accept = true;
-                    if (Date.now() < bandCursorGuardUntil) {
-                        accept = bandCursor !== null && closestBandIndex(hz) === bandCursor;
-                        if (accept) bandCursorGuardUntil = 0;   // confirmed
-                    }
-                    if (accept) {
-                        if (trx === targetTrx()) vfoDial.acceptEcho(hz);
-                        else slice(trx).frequency = hz;
+                    if (trx === targetTrx()) vfoDial.acceptEcho(hz);
+                    else slice(trx).frequency = hz;
+                }
+                break;
+            }
+            // band_select:<trx>,<band> — server-authoritative active band
+            // (AetherSDR TCI extension). Unlike the old vfo-based band-change
+            // guessing this replaced, every record here names the CURRENT
+            // real band, so it is always safe to store; the guard below only
+            // reconciles the Up/Down stepping cursor, not the stored value.
+            case "band_select": {
+                const trx = trxOf(p[0]);
+                const band = p[1];
+                if (p.length >= 2 && trx !== null && band) {
+                    slice(trx).band = band;
+                    known.add("band_select:" + trx);
+                    if (trx === targetTrx()) {
+                        if (bandCursor !== null && BAND_ORDER[bandCursor] === band) {
+                            bandCursorGuardUntil = 0;   // confirmed
+                        }
                         if (Date.now() >= bandCursorGuardUntil) bandCursor = null;
                     }
                 }
@@ -415,45 +414,42 @@ function parseTci(msg) {
 }
 
 // ── Band data ───────────────────────────────────────────────────────────────
-const BANDS = {
-    "160m": 1900000, "80m": 3800000, "60m": 5357000, "40m": 7200000,
-    "30m": 10125000, "20m": 14225000, "17m": 18118000, "15m": 21300000,
-    "12m": 24940000, "10m": 28400000, "6m": 50125000,
-};
-const BAND_ORDER = Object.keys(BANDS);
+// Real band-stack recall via `band_select:<trx>,<band>;` — not a hardcoded
+// per-band frequency table. The radio's Flex band stack owns frequency,
+// mode, filter and antenna for the recalled band; this plugin only ever asks
+// for a band by name and reflects back whatever the server confirms.
+const BAND_ORDER = [
+    "160m", "80m", "60m", "40m", "30m", "20m",
+    "17m", "15m", "12m", "10m", "6m",
+];
 
-function closestBandIndex(freq) {
-    return closestIndex(BAND_ORDER.map(b => BANDS[b]), freq);
-}
-
-// Band up/down cursor. Deriving the current band from the reported VFO on
-// every press looks simpler but breaks against the server as it stands: a
-// band change moves the panadapter (`dds:` follows, and so do modulation and
-// rx_filter_band) while `vfo:` keeps reporting the pre-change frequency. Band
-// stepping then recomputes from that stale value every press and stays parked
-// one band away from where the operator actually is.
+// Band up/down cursor. Deriving the current band from the last CONFIRMED
+// band_select: on every press looks simpler but breaks against a fast
+// double-press: a band-stack recall takes a moment to settle server-side
+// (Flex destroys/rebuilds the slice), so pressing again before that
+// confirmation lands would recompute from the pre-change band and stay
+// parked one band away from where the operator actually is.
 //
 // The cursor holds what WE last commanded instead. It resyncs from the
-// reported frequency only outside the guard window below, so an operator
-// tuning elsewhere is still picked up, while the stale post-band-change echo
-// cannot drag stepping back. The server-side behaviour is a separate defect
-// and is not worked around any further than this.
+// server-confirmed band once that exact band is confirmed, or once the guard
+// window lapses, so an operator changing bands elsewhere is still picked up,
+// while a same-band echo that hasn't caught up yet cannot drag stepping back.
 const BAND_CURSOR_GUARD_MS = 2000;
 let bandCursor = null;
 let bandCursorGuardUntil = 0;
 
 function bandIndexForStep() {
-    if (bandCursor === null) bandCursor = closestBandIndex(targetSlice().frequency);
+    if (bandCursor === null) {
+        const known = BAND_ORDER.indexOf(targetSlice().band);
+        bandCursor = known >= 0 ? known : 0;
+    }
     return bandCursor;
 }
 
 function tuneToBand(index) {
     bandCursor = index;
     bandCursorGuardUntil = Date.now() + BAND_CURSOR_GUARD_MS;
-    const trx = targetTrx();
-    const hz = BANDS[BAND_ORDER[index]];
-    slice(trx).frequency = hz;  // optimistic; see note above
-    tciSend(`vfo:${trx},0,${hz};`);
+    tciSend(`band_select:${targetTrx()},${BAND_ORDER[index]};`);
 }
 
 // ── Action handlers ─────────────────────────────────────────────────────────
@@ -503,6 +499,17 @@ const keypadTitles = {
     "com.aethersdr.radio.slice-volume-up":   () => `SLICE VOL+\n${shown("rx_volume:" + targetTrx(), targetSlice().rxVolume)}`,
     "com.aethersdr.radio.slice-volume-down": () => `SLICE VOL-\n${shown("rx_volume:" + targetTrx(), targetSlice().rxVolume)}`,
 };
+
+// Active-band key state, server-authoritative from band_select: (parseTci()
+// above) — the same text-based state convention every other stateful key in
+// this plugin uses (there is no setState/multi-image use anywhere here).
+// refreshKeypads() re-evaluates every provider on each parseTci() call, so a
+// band_select: broadcast repaints every band key at once, including clearing
+// the mark on whichever one was previously active.
+for (const band of BAND_ORDER) {
+    keypadTitles[`com.aethersdr.radio.band-${band}`] =
+        () => (targetSlice().band === band ? `${band} ●` : band);
+}
 
 // Last title actually pushed per context, so an unchanged title costs nothing.
 // This matters more than it looks: TciServer::broadcastStatus emits rx_smeter
@@ -882,8 +889,8 @@ const actionHandlers = {
     // Frequency. Stepping needs a baseline; a direct band button does not.
     "com.aethersdr.radio.tune-up":   { keyDown: () => { const trx = targetTrx(); if (!needs(`vfo:${trx}`)) return; const s = slice(trx); s.frequency += TUNE_STEP_HZ; tciSend(`vfo:${trx},0,${s.frequency};`); } },
     "com.aethersdr.radio.tune-down": { keyDown: () => { const trx = targetTrx(); if (!needs(`vfo:${trx}`)) return; const s = slice(trx); s.frequency = Math.max(VFO_FREQ_MIN, s.frequency - TUNE_STEP_HZ); tciSend(`vfo:${trx},0,${s.frequency};`); } },
-    "com.aethersdr.radio.band-up":   { keyDown: () => { if (!needs(`vfo:${targetTrx()}`)) return; tuneToBand(Math.min(bandIndexForStep() + 1, BAND_ORDER.length - 1)); } },
-    "com.aethersdr.radio.band-down": { keyDown: () => { if (!needs(`vfo:${targetTrx()}`)) return; tuneToBand(Math.max(bandIndexForStep() - 1, 0)); } },
+    "com.aethersdr.radio.band-up":   { keyDown: () => { if (!needs(`band_select:${targetTrx()}`)) return; tuneToBand(Math.min(bandIndexForStep() + 1, BAND_ORDER.length - 1)); } },
+    "com.aethersdr.radio.band-down": { keyDown: () => { if (!needs(`band_select:${targetTrx()}`)) return; tuneToBand(Math.max(bandIndexForStep() - 1, 0)); } },
     // DVK
     "com.aethersdr.radio.dvk-play":   { keyDown: () => tciSend(`rx_play:${targetTrx()},true;`) },
     "com.aethersdr.radio.dvk-record": { keyDown: () => tciSend(`rx_record:${targetTrx()},true;`) },

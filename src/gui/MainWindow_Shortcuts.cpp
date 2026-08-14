@@ -695,6 +695,15 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
 }
 
 
+std::pair<double, QString> MainWindow::bandShortcutDefaults(const QString& bandName)
+{
+    const auto it = std::find_if(std::begin(kBands), std::end(kBands),
+        [&bandName](const BandDef& b) { return bandName == QLatin1String(b.name); });
+    if (it == std::end(kBands))
+        return {0.0, QString()};
+    return {it->defaultFreqMhz, QString::fromLatin1(it->defaultMode)};
+}
+
 void MainWindow::registerShortcutActions()
 {
     // Helper: nudge active slice frequency by N steps.
@@ -793,19 +802,18 @@ void MainWindow::registerShortcutActions()
         "17m",  "15m", "12m", "10m", "6m",  "2m",
     };
     for (const char* name : kShortcutBandNames) {
-        const auto it = std::find_if(std::begin(kBands), std::end(kBands),
-            [name](const BandDef& b) { return std::strcmp(b.name, name) == 0; });
+        QString bandName = QString::fromLatin1(name);
         // kShortcutBandNames is a fixed, hand-checked list, so a miss means
         // it fell out of sync with kBands — fail loudly in dev/CI builds
-        // rather than silently dropping a shortcut. Still guarded for
-        // release builds, where Q_ASSERT_X compiles out.
-        Q_ASSERT_X(it != std::end(kBands), "registerBandShortcuts",
+        // rather than silently registering a dead shortcut. Still guarded
+        // for release builds, where Q_ASSERT_X compiles out.
+        const bool inKBands = std::any_of(std::begin(kBands), std::end(kBands),
+            [name](const BandDef& b) { return std::strcmp(b.name, name) == 0; });
+        Q_ASSERT_X(inKBands, "registerBandShortcuts",
                    "kShortcutBandNames entry missing from kBands");
-        if (it == std::end(kBands))
+        if (!inKBands)
             continue;
-        QString bandName = QString::fromLatin1(it->name);
-        double freq = it->defaultFreqMhz;
-        QString mode = QString::fromLatin1(it->defaultMode);
+        const auto [freq, mode] = bandShortcutDefaults(bandName);
         const QString id = QStringLiteral("band_%1").arg(bandName);
         m_shortcutManager.registerAction(id, bandName, "Band",
             QKeySequence(), [this, bandName, freq, mode]() {

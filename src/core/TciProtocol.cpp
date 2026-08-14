@@ -6,6 +6,7 @@
 #include "TciTrxMap.h"
 #include "models/RadioModel.h"
 #include "models/SliceModel.h"
+#include "models/BandSettings.h"
 #include "models/PanadapterModel.h"
 #include "models/TransmitModel.h"
 #include "models/EqualizerModel.h"
@@ -288,6 +289,8 @@ QString TciProtocol::generateInitBurst()
             burst += QStringLiteral("dds:%1,%2;").arg(trx).arg(ddsCenterHz(m_model, s));
             burst += QStringLiteral("modulation:%1,%2;")
                          .arg(trx).arg(smartsdrToTci(s->mode()));
+            burst += QStringLiteral("band_select:%1,%2;")
+                         .arg(trx).arg(BandSettings::bandForFrequency(s->frequency()));
             burst += QStringLiteral("rx_enable:%1,true;").arg(trx);
 
             // Filter
@@ -430,6 +433,7 @@ QString TciProtocol::handleCommand(const QString& cmd)
     m_vfoRequest.reset();
     m_splitRequest.reset();
     m_trxRequest.reset();
+    m_bandSelectRequest.reset();
 
     if (cmd.isEmpty()) return {};
 
@@ -526,6 +530,7 @@ QString TciProtocol::handleCommand(const QString& cmd)
     if (name == "rx_play")          return cmdRxPlay(args, isSet);
     if (name == "tx_gain")          return cmdTxGain(args, isSet);
     if (name == "active_slice")     return cmdActiveSlice(args);
+    if (name == "band_select")      return cmdBandSelect(args, isSet);
 
     // Unknown command — ignore silently per TCI spec
     return {};
@@ -556,6 +561,13 @@ std::optional<TciProtocol::TrxRequest> TciProtocol::takeTrxRequest()
 {
     std::optional<TrxRequest> request = std::move(m_trxRequest);
     m_trxRequest.reset();
+    return request;
+}
+
+std::optional<TciProtocol::BandSelectRequest> TciProtocol::takeBandSelectRequest()
+{
+    std::optional<BandSelectRequest> request = std::move(m_bandSelectRequest);
+    m_bandSelectRequest.reset();
     return request;
 }
 
@@ -1894,6 +1906,33 @@ QString TciProtocol::cmdActiveSlice(const QStringList& args)
     QString letter;
     if (!resolveActiveSlice(trx, letter)) return {};
     return QStringLiteral("active_slice:%1,%2;").arg(trx).arg(letter);
+}
+
+// ── BAND_SELECT: AetherSDR extension — get/set the active band-stack band ──
+// SET stashes the request: the actual band-stack recall runs through
+// MainWindow::selectBand() (XVTR resolution, SWR-sweep clear, #4158
+// slice-rebind guard, KiwiSDR mute handoff), which TciProtocol/TciServer
+// cannot reach directly, so TciServer forwards it via bandSelectRequested()
+// — same pattern as pendingMasterVolume()/pendingTxGain().
+QString TciProtocol::cmdBandSelect(const QStringList& args, bool isSet)
+{
+    if (args.isEmpty()) return {};
+    bool trxOk = false;
+    const int trx = args[0].toInt(&trxOk);
+    if (!trxOk || trx < 0)
+        return {};
+
+    if (!isSet) {
+        auto* s = sliceForTrx(trx);
+        if (!s) return {};
+        const QString band = BandSettings::bandForFrequency(s->frequency());
+        return QStringLiteral("band_select:%1,%2;").arg(trx).arg(band);
+    }
+
+    const QString band = args[1].trimmed();
+    if (band.isEmpty()) return {};
+    m_bandSelectRequest = BandSelectRequest { trx, band };
+    return {};
 }
 
 QString TciProtocol::cmdSetInFocus()

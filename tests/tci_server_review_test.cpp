@@ -1240,6 +1240,100 @@ public:
                            expectedPcm.constData(),
                            static_cast<size_t>(expectedPcm.size())) == 0;
     }
+
+    // band_select:<trx>,<band>; SET must resolve through the same strict
+    // trx→slice map PTT uses (#4547 precedent) and forward the slice's real
+    // panId, never guess at slice 0 — a wrong-slice band-stack recall is
+    // destructive, not merely mistargeted.
+    static bool bandSelectRequestResolvesPanIdAndEmits()
+    {
+        RadioModel model;
+        QString error;
+        if (!model.automationApplySliceFixture(0, QString(), &error))
+            return false;
+        SliceModel* slice = model.slice(0);
+        if (!slice)
+            return false;
+
+        TciServer server(&model);
+        QWebSocket client;
+
+        QStringList capturedPanIds;
+        QStringList capturedBands;
+        QObject::connect(&server, &TciServer::bandSelectRequested,
+                         [&](const QString& panId, const QString& band) {
+            capturedPanIds << panId;
+            capturedBands << band;
+        });
+
+        server.handleBandSelectRequest(&client,
+            TciProtocol::BandSelectRequest { 0, QStringLiteral("40m") });
+        if (capturedPanIds.size() != 1 || capturedPanIds.first() != slice->panId()
+            || capturedBands != QStringList{QStringLiteral("40m")}) {
+            std::printf("      band_select SET did not resolve to the slice's pan\n");
+            return false;
+        }
+
+        // An unresolvable trx must refuse rather than guess (no slice at 7).
+        server.handleBandSelectRequest(&client,
+            TciProtocol::BandSelectRequest { 7, QStringLiteral("40m") });
+        if (capturedPanIds.size() != 1) {
+            std::printf("      band_select SET for an unknown trx must not emit\n");
+            return false;
+        }
+        return true;
+    }
+
+    // The server-authoritative band_select: broadcast (added alongside the
+    // existing vfo:/dds: broadcast in broadcastSliceFrequencies) must fire
+    // exactly once when a slice's frequency actually crosses into a new
+    // band, and not on every in-band tuning step — otherwise a control
+    // surface's active-band key state would repaint on every VFO tick.
+    static bool bandSelectBroadcastOnlyOnBandChange()
+    {
+        RadioModel model;
+        QString error;
+        if (!model.automationApplySliceFixture(0, QString(), &error))
+            return false;
+        SliceModel* slice = model.slice(0);
+        if (!slice)
+            return false;
+
+        TciServer server(&model);
+        QWebSocket sock;
+        TciServer::ClientState cs;
+        cs.socket = &sock;
+        server.m_clients.append(cs);
+        server.wireSlice(0, slice);
+
+        QStringList bandBroadcasts;
+        QObject::connect(&server, &TciServer::tciMessage,
+            [&bandBroadcasts](const QString& dir, const QString& msg) {
+                if (dir == QLatin1String("tx")
+                    && msg.startsWith(QLatin1String("band_select:")))
+                    bandBroadcasts << msg.trimmed();
+            });
+
+        // Fixture starts at 14.225 MHz (20m). Tune within 20m: no broadcast.
+        slice->setFrequency(14.250);
+        if (!bandBroadcasts.isEmpty()) {
+            std::printf("      in-band tune spuriously broadcast band_select: %s\n",
+                        qPrintable(bandBroadcasts.join(QStringLiteral(" "))));
+            return false;
+        }
+
+        // Cross into 40m: exactly one broadcast, with the right band.
+        slice->setFrequency(7.200);
+        if (bandBroadcasts != QStringList{QStringLiteral("band_select:0,40m;")}) {
+            std::printf("      band change broadcast: %s\n",
+                        qPrintable(bandBroadcasts.join(QStringLiteral(" "))));
+            return false;
+        }
+
+        // Tune again within 40m: still no additional broadcast.
+        slice->setFrequency(7.150);
+        return bandBroadcasts == QStringList{QStringLiteral("band_select:0,40m;")};
+    }
 };
 
 } // namespace AetherSDR
@@ -1296,6 +1390,10 @@ int main(int argc, char** argv)
         = AetherSDR::TciServerReviewTest::pttRouteLogSanitizesClientSource();
     const bool native24kPayload
         = AetherSDR::TciServerReviewTest::native24kAudioRetainsAccumulatedPayload();
+    const bool bandSelectResolves
+        = AetherSDR::TciServerReviewTest::bandSelectRequestResolvesPanIdAndEmits();
+    const bool bandSelectDedups
+        = AetherSDR::TciServerReviewTest::bandSelectBroadcastOnlyOnBandChange();
 
     std::printf("%s  isolated settings profile\n",
                 validProfile ? "PASS" : "FAIL");
@@ -1347,6 +1445,11 @@ int main(int argc, char** argv)
                 routeLogSanitizes ? "PASS" : "FAIL");
     std::printf("%s  native 24 kHz TCI RX retains accumulated payload (#4744)\n",
                 native24kPayload ? "PASS" : "FAIL");
+    std::printf("%s  band_select: SET resolves the slice's real pan, refuses "
+                "an unknown trx\n",
+                bandSelectResolves ? "PASS" : "FAIL");
+    std::printf("%s  band_select: broadcasts only on an actual band change\n",
+                bandSelectDedups ? "PASS" : "FAIL");
 
     return validProfile && deferredAbort && observableFailure && pttBindsReceiver
         && pttUsesStableMap
@@ -1356,6 +1459,6 @@ int main(int argc, char** argv)
         && trxDistinctReconnect && heldTrxRefuses
         && vfoConfirmsAccepted && vfoConfirmsRefusal && vfoAcksNoOp
         && routeLogStaleCache && routeLogSampleOrder && routeLogSanitizes
-        && native24kPayload
+        && native24kPayload && bandSelectResolves && bandSelectDedups
         ? 0 : 1;
 }

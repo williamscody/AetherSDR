@@ -50,6 +50,7 @@
 #include "gui/FreeDvReporterDialog.h"
 #endif
 #include <QThread>
+#include <utility>
 #ifdef HAVE_SERIALPORT
 #include "core/SerialPortController.h"
 #include "core/FlexControlManager.h"
@@ -411,6 +412,12 @@ private:
     //     non-empty) then frequency directly on the active slice.
     void selectBand(const QString& panId, const QString& bandName, double freqMhz,
                     const QString& mode, const QString& stackKeyHint = QString());
+    // (freqMhz, mode) defaults for a band_* shortcut/MIDI/TCI band-select
+    // trigger, looked up from AetherSDR::kBands (BandDefs.h) — the single
+    // source both the shortcut registration loop and the TCI band_select
+    // handler draw from, so they can never drift apart (#4967 precedent).
+    // Falls back to {0.0, QString()} for a name kBands doesn't recognize.
+    static std::pair<double, QString> bandShortcutDefaults(const QString& bandName);
     // Lock / SWR-sweep guards shared by every tune source.  Returns true if the
     // tune must be blocked (and, for a locked active slice, restores the VFO
     // readout).  Lets the edge-pan tune path — which bypasses applyTuneRequest

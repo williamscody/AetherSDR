@@ -11,6 +11,14 @@
 // and the four values that had diverged must have the correct (BAND_GRID)
 // numbers.
 //
+// MainWindow::bandShortcutDefaults(bandName) (MainWindow_Shortcuts.cpp) now
+// draws from this same kBands lookup — shared by the shortcut/MIDI loop and
+// the TCI band_select handler (MainWindow_Session.cpp) — so all 12 bands'
+// (freq, mode) pairs are pinned below, not just the four that had drifted.
+// Same reachability limit applies: bandShortcutDefaults() is a MainWindow
+// static method, so it can't be called from this Qt-less test either; this
+// pins the data it's a thin wrapper over.
+//
 // Pure arithmetic/lookup over constexpr data — no Qt event loop, no
 // rendering, no platform-dependent behaviour.
 
@@ -67,15 +75,25 @@ int main(int argc, char** argv)
         report(label, findBand(name) != nullptr);
     }
 
-    // ── The four values that had diverged from BAND_GRID (#4967 review) ───
-    // These are the actual non-Flex tune targets; on Flex they are hints
-    // only, so the drift was invisible until read against BAND_GRID.
-    struct Pin { const char* name; double freqMhz; };
+    // ── Full (freq, mode) pins for every shortcut band ─────────────────────
+    // These are the actual non-Flex tune targets, and now also the values
+    // MainWindow::bandShortcutDefaults() hands to a TCI band_select recall
+    // on a non-Flex radio; on Flex both paths treat them as hints only, so
+    // drift here is invisible until read against BAND_GRID/kBands directly.
+    struct Pin { const char* name; double freqMhz; const char* mode; };
     static const Pin kPins[] = {
-        {"17m", 18.130},
-        {"12m", 24.950},
-        {"6m",  50.150},
-        {"2m",  144.200},
+        {"160m", 1.900,   "LSB"},
+        {"80m",  3.800,   "LSB"},
+        {"60m",  5.357,   "USB"},
+        {"40m",  7.200,   "LSB"},
+        {"30m",  10.125,  "DIGU"},
+        {"20m",  14.225,  "USB"},
+        {"17m",  18.130,  "USB"},
+        {"15m",  21.300,  "USB"},
+        {"12m",  24.950,  "USB"},
+        {"10m",  28.400,  "USB"},
+        {"6m",   50.150,  "USB"},
+        {"2m",   144.200, "USB"},
     };
     for (const auto& pin : kPins) {
         const BandDef* b = findBand(pin.name);
@@ -83,6 +101,9 @@ int main(int argc, char** argv)
         std::snprintf(label, sizeof(label), "%s default frequency is %.3f MHz",
                       pin.name, pin.freqMhz);
         report(label, b && b->defaultFreqMhz == pin.freqMhz);
+        std::snprintf(label, sizeof(label), "%s default mode is %s",
+                      pin.name, pin.mode);
+        report(label, b && std::strcmp(b->defaultMode, pin.mode) == 0);
     }
 
     // ── Every shortcut band must carry a non-empty mode ────────────────────

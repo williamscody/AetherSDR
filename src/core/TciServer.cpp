@@ -8,6 +8,7 @@
 #include "LogManager.h"
 #include "models/RadioModel.h"
 #include "models/SliceModel.h"
+#include "models/BandSettings.h"
 #include "models/PanadapterModel.h"
 #include "models/DaxIqModel.h"
 #include "models/MeterModel.h"
@@ -1137,6 +1138,9 @@ void TciServer::onTextMessage(const QString& msg)
         if (const auto request = client.protocol->takeTrxRequest()) {
             handleTrxRequest(ws, *request);
         }
+        if (const auto request = client.protocol->takeBandSelectRequest()) {
+            handleBandSelectRequest(ws, *request);
+        }
 
         // If the command changed radio state, broadcast to all other clients
         QString notification = client.protocol->pendingNotification();
@@ -2103,6 +2107,17 @@ void TciServer::handleTrxRequest(QWebSocket* client, const TciProtocol::TrxReque
     });
 }
 
+void TciServer::handleBandSelectRequest(QWebSocket* client, const TciProtocol::BandSelectRequest& request)
+{
+    Q_UNUSED(client);
+    if (!m_model) return;
+    // Strict resolution — refuse rather than guess which slice/pan a wrong
+    // trx would recall onto; a wrong-slice band-stack recall is destructive
+    // (#4547 precedent, same reasoning as PTT's resolveSliceForTrxStrict use).
+    if (auto* s = TciProtocol::resolveSliceForTrxStrict(m_model, request.trx))
+        emit bandSelectRequested(s->panId(), request.band);
+}
+
 // ── Binary message handler (TX audio from TCI client) ───────────────────
 
 void TciServer::onBinaryMessage(const QByteArray& data)
@@ -2657,6 +2672,15 @@ void TciServer::broadcastSliceFrequencies(SliceModel* slice)
     const long long ddsHz = TciProtocol::ddsCenterHz(m_model, slice);
     broadcast(QStringLiteral("vfo:%1,0,%2;").arg(trx).arg(vfoHz));
     broadcast(QStringLiteral("dds:%1,%2;").arg(trx).arg(ddsHz));
+
+    // Server-authoritative "active band" for control surfaces (Elgato/
+    // StreamController/Ulanzi key-state highlighting) — only re-broadcast
+    // when the band actually changed, not on every in-band tuning step.
+    const QString band = BandSettings::bandForFrequency(slice->frequency());
+    if (m_lastBroadcastBand.value(trx) != band) {
+        m_lastBroadcastBand[trx] = band;
+        broadcast(QStringLiteral("band_select:%1,%2;").arg(trx).arg(band));
+    }
 
     if (slice->sliceId() == m_routingState.txSliceId()) {
         SliceModel* rxSlice = m_model->slice(m_routingState.rxSliceId());

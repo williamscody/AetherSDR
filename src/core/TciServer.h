@@ -153,6 +153,13 @@ signals:
     // master volume slider — m_audio->setRxVolume() (or lineout when PC
     // audio is off) plus persistence to AppSettings.
     void masterVolumeRequested(int pct);
+    // Emitted when a TCI client sends `band_select:<trx>,<band>;` (SET).
+    // TciProtocol/TciServer own only RadioModel, so they can't run the
+    // actual band-stack recall (MainWindow::selectBand() — XVTR resolution,
+    // SWR-sweep clear, #4158 slice-rebind guard, KiwiSDR mute handoff).
+    // MainWindow forwards this to selectBand(), mirroring band buttons,
+    // keyboard shortcuts, and MIDI.
+    void bandSelectRequested(const QString& panId, const QString& band);
 
 private slots:
     void onNewConnection();
@@ -195,6 +202,7 @@ private:
     void handleVfoRequest(QWebSocket* client, const TciProtocol::VfoRequest& request);
     void handleSplitRequest(QWebSocket* client, const TciProtocol::SplitRequest& request);
     void handleTrxRequest(QWebSocket* client, const TciProtocol::TrxRequest& request);
+    void handleBandSelectRequest(QWebSocket* client, const TciProtocol::BandSelectRequest& request);
     void tuneSliceAndConfirm(
         QWebSocket* client, int trx, int channel, int sliceId, long long frequencyHz);
     void promoteTxSliceAndContinue(int sliceId, std::function<void(bool)> continuation);
@@ -331,6 +339,11 @@ private:
     // Last resolved TX-slice trx, used to label drive:/tune_drive: when a
     // band-change slice recreation momentarily leaves no slice marked TX.
     int               m_lastTxTrx{0};
+    // Last band_select: value broadcast per trx, so an in-band frequency
+    // change (tuning within a slice's current band) doesn't spam a
+    // redundant band_select: broadcast on every frequencyChanged tick —
+    // only an actual band change re-broadcasts.
+    QHash<int, QString> m_lastBroadcastBand;
     QTimer*           m_txChronoTimer{nullptr}; // TX_CHRONO frame cadence
     QWebSocket*       m_txChronoClient{nullptr};
     QPointer<QWebSocket> m_tciPttClient;

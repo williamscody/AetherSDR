@@ -36,6 +36,16 @@ public:
         QString source;
     };
 
+    // AetherSDR extension: a `band_select:<trx>,<band>;` SET. band is a
+    // canonical band name (BandDefs.h), e.g. "20m". TciProtocol has no
+    // MainWindow access to run the actual band-stack recall, so this is
+    // stashed and forwarded the same way as VfoRequest/TrxRequest.
+    struct BandSelectRequest
+    {
+        int trx { -1 };
+        QString band;
+    };
+
     explicit TciProtocol(RadioModel* model, TciRoutingState* routingState = nullptr,
                          const TciTrxMap* trxMap = nullptr);
 
@@ -53,6 +63,7 @@ public:
     std::optional<VfoRequest> takeVfoRequest();
     std::optional<SplitRequest> takeSplitRequest();
     std::optional<TrxRequest> takeTrxRequest();
+    std::optional<BandSelectRequest> takeBandSelectRequest();
 
     // After handleCommand(), if the command was a master-volume SET, this
     // returns the requested level (0-100). -1 means no master-volume change
@@ -133,6 +144,7 @@ private:
     QString cmdRxRecord(const QStringList& args, bool isSet);
     QString cmdRxPlay(const QStringList& args, bool isSet);
     QString cmdActiveSlice(const QStringList& args);
+    QString cmdBandSelect(const QStringList& args, bool isSet);
     QString cmdSpot(const QStringList& args);
     QString cmdSpotDelete(const QStringList& args);
     QString cmdSpotClear();
@@ -227,6 +239,7 @@ private:
     std::optional<VfoRequest> m_vfoRequest;
     std::optional<SplitRequest> m_splitRequest;
     std::optional<TrxRequest> m_trxRequest;
+    std::optional<BandSelectRequest> m_bandSelectRequest;
     int         m_pendingMasterVolume{-1};   // -1 = no change requested
     int         m_pendingTxGain{-1};         // -1 = no change requested
     int         m_activeTrx{-1};             // -1 = focus not yet known (#4160)

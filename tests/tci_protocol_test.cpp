@@ -371,6 +371,49 @@ bool testDriveWireContract()
     return true;
 }
 
+// AetherSDR extension: `band_select:<trx>,<band>;` mirrors the
+// VfoRequest/TrxRequest deferred-stash pattern above — TciProtocol has no
+// MainWindow to run the actual band-stack recall through, so a SET is only
+// ever stashed for TciServer to forward (see TciServer::bandSelectRequested).
+bool testBandSelectDeferred()
+{
+    TciProtocol protocol(nullptr);
+
+    if (!check(protocol.handleCommand(QStringLiteral("band_select:0,20m")).isEmpty(),
+            "band_select SET must not be acknowledged by the parser")) {
+        return false;
+    }
+    const auto band = protocol.takeBandSelectRequest();
+    if (!check(band && band->trx == 0 && band->band == QStringLiteral("20m"),
+            "band_select SET must preserve trx/band")) {
+        return false;
+    }
+    if (!check(!protocol.takeBandSelectRequest(),
+            "band_select request must be consumed exactly once")) {
+        return false;
+    }
+
+    // Malformed SETs must leave nothing stashed.
+    protocol.handleCommand(QStringLiteral("band_select:notanumber,20m"));
+    if (!check(!protocol.takeBandSelectRequest(),
+            "band_select SET with a non-numeric trx must be rejected")) {
+        return false;
+    }
+    protocol.handleCommand(QStringLiteral("band_select:0,"));
+    if (!check(!protocol.takeBandSelectRequest(),
+            "band_select SET with an empty band must be rejected")) {
+        return false;
+    }
+
+    // GET with no model/slice must stay silent, matching modulation/vfo.
+    if (!check(protocol.handleCommand(QStringLiteral("band_select:0")).isEmpty(),
+            "band_select GET with no resolvable slice must stay silent")) {
+        return false;
+    }
+
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -420,7 +463,8 @@ int main(int argc, char** argv)
     if (!testRoutingPolicy() || !testStaleRouteFailsSafe()
         || !testBarePttKeysTheRequestedSlice()
         || !testWsjtxRoutingContracts()
-        || !testDeferredCommands() || !testDriveWireContract()) {
+        || !testDeferredCommands() || !testDriveWireContract()
+        || !testBandSelectDeferred()) {
         return 1;
     }
 

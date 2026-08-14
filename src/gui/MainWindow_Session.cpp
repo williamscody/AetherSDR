@@ -1816,6 +1816,16 @@ void MainWindow::wireCatPorts()
         applyMasterVolume(pct);
     });
 
+    // TCI `band_select:<trx>,<band>;` SET → the same band-stack recall path
+    // used by band buttons, keyboard shortcuts, and MIDI (#selectBand).
+    // TciProtocol/TciServer can't reach MainWindow directly (same reason as
+    // masterVolumeRequested above), so this is forwarded via signal.
+    connect(tciServer(), &TciServer::bandSelectRequested,
+            this, [this](const QString& panId, const QString& band) {
+        const auto [freqMhz, mode] = bandShortcutDefaults(band);
+        selectBand(panId, band, freqMhz, mode);
+    });
+
     // Wire slice state changes -> TCI broadcasts. TCI receivers are contiguous
     // indexes within our owned slice list; Flex slice ids can be non-zero when
     // another client owns lower-numbered slices.

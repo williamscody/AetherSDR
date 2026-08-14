@@ -31,7 +31,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Radio state the fake server reports. Deliberately unlike the plugin's own
 // initial values, so a test cannot pass by reading an uninitialised default.
-const RADIO = { drive: 37, tuneDrive: 7, volumeDb: -6, rxVolume: 42, vfoHz: 14074000 };
+const RADIO = { drive: 37, tuneDrive: 7, volumeDb: -6, rxVolume: 42, vfoHz: 14074000, band: "20m" };
 
 /**
  * Boots the plugin against fake sockets, runs `body`, then tears everything
@@ -67,6 +67,7 @@ async function withPlugin(body, { silent = false } = {}) {
             `vfo:0,0,${RADIO.vfoHz};`, `drive:0,${RADIO.drive};`,
             `tune_drive:0,${RADIO.tuneDrive};`, `volume:${RADIO.volumeDb};`,
             `rx_volume:0,${RADIO.rxVolume};`, "active_slice:0,A;",
+            `band_select:0,${RADIO.band};`,
             ...FLAG_VERBS.map((v) => `${v}:0,false;`),
             "ready;", "start;",
         ]) ws.send(c);
@@ -179,6 +180,7 @@ function answerGet(ws, record) {
     else if (verb === "tune_drive") ws.send(`tune_drive:${trx},${RADIO.tuneDrive};`);
     else if (verb === "rx_volume") ws.send(`rx_volume:${trx},${RADIO.rxVolume};`);
     else if (verb === "vfo") ws.send(`vfo:${trx},0,${RADIO.vfoHz};`);
+    else if (verb === "band_select") ws.send(`band_select:${trx},${RADIO.band};`);
     else if (FLAG_VERBS.includes(verb)) ws.send(`${verb}:${trx},false;`);
 }
 
@@ -310,6 +312,76 @@ test("slice-scoped actions follow the selected target", async () => {
     });
 });
 
+// ── Band selection ──────────────────────────────────────────────────────────
+
+test("a band button sends band_select, not a hardcoded vfo: tune", async () => {
+    await withPlugin(async (p) => {
+        p.appear("band-40m");
+        await p.settle(300);
+        p.sent.length = 0;
+        p.press("band-40m");
+        await p.settle(150);
+        assert.deepEqual(cmds(p.sent, "band_select"), ["band_select:0,40m"],
+            "band button did not send a real band_select recall");
+        assert.deepEqual(cmds(p.sent, "vfo"), [],
+            "band button still faked the change with a vfo: tune");
+    });
+});
+
+test("band up/down step by band name, not by a hardcoded frequency table", async () => {
+    await withPlugin(async (p) => {
+        p.appear("band-up");
+        p.appear("band-down");
+        await p.settle(400);       // init burst reports band_select:0,20m;
+
+        p.sent.length = 0;
+        p.press("band-up");
+        await p.settle(150);
+        assert.deepEqual(cmds(p.sent, "band_select"), ["band_select:0,17m"],
+            "Band Up did not step to the next band by name");
+
+        p.sent.length = 0;
+        p.fromRadio("band_select:0,17m;");   // radio confirms the recall
+        await p.settle(150);
+        p.press("band-down");
+        p.press("band-down");
+        await p.settle(150);
+        assert.deepEqual(cmds(p.sent, "band_select"),
+            ["band_select:0,20m", "band_select:0,30m"],
+            "Band Down did not step back through confirmed bands");
+    });
+});
+
+test("band-up/down refuse until the radio has reported a band, matching other relative actions", async () => {
+    await withSilentRadio(async (p) => {
+        p.appear("band-up");
+        p.appear("band-down");
+        await p.settle(400);
+        p.sent.length = 0;
+        p.press("band-up");
+        p.press("band-down");
+        await p.settle(150);
+        assert.deepEqual(cmds(p.sent, "band_select"), [],
+            "band stepping commanded the radio from a fabricated baseline");
+    });
+});
+
+test("a band_select: broadcast marks the active band key and clears the previous one", async () => {
+    await withPlugin(async (p) => {
+        p.appear("band-20m");
+        p.appear("band-40m");
+        await p.settle(400);       // init burst reports band_select:0,20m;
+
+        assert.match(p.titles.get("band-20m"), /^20m ●/, "current band key is not marked active");
+        assert.equal(p.titles.get("band-40m"), "40m", "non-active band key was marked active");
+
+        p.fromRadio("band_select:0,40m;");
+        await p.settle(200);
+        assert.equal(p.titles.get("band-20m"), "20m", "previous band key kept its active mark");
+        assert.match(p.titles.get("band-40m"), /^40m ●/, "newly active band key was not marked");
+    });
+});
+
 // ── Protocol safety ─────────────────────────────────────────────────────────
 
 test("the master-volume read never uses the SET-shaped `volume:` form", async () => {
@@ -335,6 +407,7 @@ test("malformed records create no phantom state and no NaN labels", async () => 
         for (const junk of [
             "rx_nb_enable:,true;", "rx_nb_enable:abc,true;", "vfo:,0,14000000;",
             "drive:;", "rx_volume:x,50;", "active_slice:;", "tx_enable:,true;",
+            "band_select:abc,20m;", "band_select:0,;", "band_select:;",
         ]) p.fromRadio(junk);
         await p.settle(300);
 
